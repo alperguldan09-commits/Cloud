@@ -1,0 +1,373 @@
+import React, { useEffect, useState, useRef } from "react";
+import { motion } from "framer-motion";
+
+/*
+  Cloud.AI - Gelişmiş Tek Dosya React Prototip
+  - Daha zengin sohbet mantığı (niyet eşleme, cevap kalıpları)
+  - Kullanıcı kaydı (isim + gmail) ve görev ekonomisi (elmaslar)
+  - Görevler: Kayıt (5 elmas), Günlük giriş (1 elmas), Tanıtım görevi (3 elmas)
+  - Kayıt/işlem bildirimleri (Notification API + konsol)
+  - Dragon City için bağlantı/placeholder + webhook/endpoint alanı
+  - Kullanıcıların localStorage'da saklanması; robot verdiği ismi hatırlayıp öyle hitap ediyor
+  - Hızlı yanıt butonları, sohbet geçmişi, basit admin paneli (yerel)
+  - Tek dosyada çalıştırılabilir. Daha ileri entegrasyonlar için backend (serverless/Firebase) eklemelidir.
+*/
+
+export default function CloudAIApp() {
+  // Kullanıcı bilgileri
+  const [user, setUser] = useState(() => {
+    try {
+      const raw = localStorage.getItem("cloudai_user");
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      return null;
+    }
+  });
+
+  // Tüm kullanıcılar (lokal admin amaçlı)
+  const [usersList, setUsersList] = useState(() => {
+    try {
+      const raw = localStorage.getItem("cloudai_users_list");
+      return raw ? JSON.parse(raw) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  const [nameInput, setNameInput] = useState("");
+  const [emailInput, setEmailInput] = useState("");
+  const [messages, setMessages] = useState(() => {
+    try {
+      const raw = localStorage.getItem("cloudai_messages");
+      return raw ? JSON.parse(raw) : [{ from: "bot", text: "Merhaba! Cloud.AI'ye hoş geldin — nasıl yardımcı olabilirim?" }];
+    } catch (e) {
+      return [{ from: "bot", text: "Merhaba! Cloud.AI'ye hoş geldin — nasıl yardımcı olabilirim?" }];
+    }
+  });
+  const [chatInput, setChatInput] = useState("");
+  const [dragonConnected, setDragonConnected] = useState(false);
+  const chatEndRef = useRef(null);
+
+  // Görevler tanımı (dinamik olarak user durumuna göre tamamlandı/eksik gösterilir)
+  const baseTasks = [
+    { id: "t_register", title: "Kayıt ol", desc: "İsim + gmail ile kayıt olarak 5 elmas kazan.", reward: 5 },
+    { id: "t_daily", title: "Günlük giriş", desc: "Her gün giriş yap ve +1 elmas kazan.", reward: 1 },
+    { id: "t_intro", title: "Tanıtım görevini tamamla", desc: "Sohbette ilk 3 soruyu cevapla, +3 elmas.", reward: 3 },
+  ];
+
+  useEffect(() => {
+    localStorage.setItem("cloudai_user", JSON.stringify(user));
+  }, [user]);
+
+  useEffect(() => {
+    localStorage.setItem("cloudai_users_list", JSON.stringify(usersList));
+  }, [usersList]);
+
+  useEffect(() => {
+    localStorage.setItem("cloudai_messages", JSON.stringify(messages));
+    scrollToEnd();
+  }, [messages]);
+
+  useEffect(() => {
+    // Bildirim izni isteği uygulama açıldığında nazikçe sorulur
+    if (typeof Notification !== "undefined" && Notification.permission === "default") {
+      try { Notification.requestPermission(); } catch (e) { /* no-op */ }
+    }
+  }, []);
+
+  function scrollToEnd() {
+    setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: "smooth" }), 60);
+  }
+
+  function pushMessage(from, text) {
+    setMessages((m) => [...m, { from, text, time: new Date().toISOString() }]);
+  }
+
+  function notifyOwner(text) {
+    // Konsola da düşsün — production'da webhook / server-side push eklenecek
+    console.info("Owner notification:", text);
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      try { new Notification("Cloud.AI Bildirim", { body: text }); } catch (e) { /* ignore */ }
+    }
+  }
+
+  function initialGems() { return 0; }
+
+  // Kayıt işlemi
+  function handleRegister(e) {
+    e?.preventDefault();
+    const name = nameInput.trim();
+    const email = emailInput.trim();
+    if (!name || !email) return alert("Lütfen isim ve gmail girin.");
+
+    const already = usersList.find(u => u.email === email);
+    if (already) {
+      // mevcut kullanıcıysa sadece yükle
+      setUser(already);
+      pushMessage("bot", `Tekrar hoş geldin, ${already.name}! Elmasın: ${already.gems} ✨`);
+      setNameInput(""); setEmailInput("");
+      notifyOwner(`Kullanıcı tekrar giriş yaptı: ${already.name} (${email})`);
+      return;
+    }
+
+    const newUser = {
+      id: `u_${Date.now()}`,
+      name,
+      email,
+      gems: initialGems() + 5, // kayıt ödülü
+      registeredAt: new Date().toISOString(),
+      tasksCompleted: ["t_register"],
+      lastDaily: null,
+    };
+
+    const updated = [...usersList, newUser];
+    setUsersList(updated);
+    setUser(newUser);
+
+    pushMessage("bot", `Hoş geldin ${newUser.name}! Kayıt ödülün: +5 elmas (Toplam: ${newUser.gems})`);
+    notifyOwner(`Yeni kayıt: ${newUser.name} — ${newUser.email}`);
+
+    setNameInput("");
+    setEmailInput("");
+  }
+
+  // Basit niyet algılama (intent matching)
+  function detectIntent(text) {
+    const t = text.trim().toLowerCase();
+    if (!t) return "empty";
+    if (/^(merhaba|selam|hi|hello)/.test(t)) return "greet";
+    if (/(elmas|puan|kasa|bakiyem)/.test(t)) return "check_gems";
+    if (/(kayıt|kaydol|register)/.test(t)) return "register";
+    if (/(dragon city|dragoncity|dragon)/.test(t)) return "dragon";
+    if (t.endsWith("?")) return "question";
+    if (/(günlük|daily)/.test(t)) return "daily";
+    if (/bye|görüşür|hoşçakal/.test(t)) return "bye";
+    return "fallback";
+  }
+
+  function generateReply(text) {
+    const intent = detectIntent(text);
+    if (intent === "empty") return "Bir şey yazarsan yardımcı olabilirim.";
+    if (intent === "greet") return `Merhaba ${user ? user.name : 'ziyaretçi'}! Ben Cloud robot — nasıl yardımcı olabilirim?`;
+    if (intent === "check_gems") return `Elmasın: ${user ? user.gems : 0} ✨`;
+    if (intent === "register") return user ? `Zaten kayıtlısın, ${user.name}.` : "Kayıt olmak için sağ taraftaki formu kullanabilirsin.";
+    if (intent === "dragon") return dragonConnected ? "Dragon City ile bağlıyız — ödül göndermek için kontrol panelini kullan." : "Dragon City bağlı değil. 'Dragon City Bağlan' butonuyla simüle edebilirsin.";
+    if (intent === "daily") return user ? `Günlük kontrol: son giriş ${user.lastDaily ? new Date(user.lastDaily).toLocaleString() : 'yok'}` : "Günlük ödül almak için kayıt olmalısın.";
+    if (intent === "question") return `Güzel bir soru: "${text}" — şu anda basit kurallarla cevap veriyorum. Daha yetenekli bir bot istersen OpenAI/llm entegrasyonu ekleyebilirim.`;
+    if (intent === "bye") return `Görüşürüz ${user ? user.name : ''}! İyi günler.`;
+    // fallback küçük konuşma ve hatırlatma
+    return user ? `${user.name}, bunu anlayamadım ama istersen görevleri deneyebilirsin. (Örn: 'Günlük')` : "Bunu anlayamadım. Kayıt olursan ismini hatırlayıp daha iyi yardımcı olurum.";
+  }
+
+  function handleSendMessage(e) {
+    e?.preventDefault();
+    if (!chatInput.trim()) return;
+    const text = chatInput.trim();
+    setMessages((m) => [...m, { from: "user", text, time: new Date().toISOString() }]);
+    setChatInput("");
+
+    setTimeout(() => {
+      // bot cevap
+      const reply = generateReply(text);
+      setMessages((m) => [...m, { from: "bot", text: reply, time: new Date().toISOString() }]);
+    }, 350);
+  }
+
+  // Görev tamamlama fonksiyonları
+  function completeTask(taskId) {
+    if (!user) return pushMessage("bot", "Görevi tamamlamak için önce kayıt olmalısın.");
+    if (user.tasksCompleted && user.tasksCompleted.includes(taskId)) return pushMessage("bot", "Bu görevi zaten tamamladın.");
+
+    const task = baseTasks.find(t => t.id === taskId);
+    if (!task) return;
+
+    const updatedUser = { ...user };
+    updatedUser.gems = (updatedUser.gems || 0) + task.reward;
+    updatedUser.tasksCompleted = [...(updatedUser.tasksCompleted || []), taskId];
+
+    // usersList içinde güncelle
+    const updatedUsers = usersList.map(u => u.email === updatedUser.email ? updatedUser : u);
+    setUsersList(updatedUsers);
+    setUser(updatedUser);
+
+    pushMessage("bot", `${task.title} tamamlandı! +${task.reward} elmas verildi. Toplam: ${updatedUser.gems} ✨`);
+    notifyOwner(`${updatedUser.name} görev tamamladı: ${task.title}`);
+  }
+
+  function claimDaily() {
+    if (!user) return pushMessage("bot", "Günlük ödülü almak için önce kayıt olmalısın.");
+    const today = new Date().toDateString();
+    if (user.lastDaily && new Date(user.lastDaily).toDateString() === today) {
+      pushMessage("bot", "Bugün zaten günlük ödülünü aldın.");
+      return;
+    }
+    const updatedUser = { ...user, gems: (user.gems || 0) + 1, lastDaily: new Date().toISOString() };
+    const updatedUsers = usersList.map(u => u.email === updatedUser.email ? updatedUser : u);
+    setUsersList(updatedUsers);
+    setUser(updatedUser);
+    pushMessage("bot", `Günlük ödül verildi: +1 elmas. Toplam: ${updatedUser.gems}`);
+    notifyOwner(`${updatedUser.name} günlük ödülü aldı.`);
+  }
+
+  function handleDragonToggle() {
+    setDragonConnected((v) => {
+      const next = !v;
+      pushMessage("bot", next ? "Dragon City'e bağlandım (simülasyon). Artık ödül gönderme simülasyonu yapabilirsin." : "Dragon City bağlantısı kapatıldı.");
+      notifyOwner(`Dragon City bağlantısı ${next ? 'kuruldu' : 'kapatıldı'} (lokal simülasyon).`);
+      return next;
+    });
+  }
+
+  function simulateSendDragonReward() {
+    if (!dragonConnected) return pushMessage("bot", "Önce Dragon City'e bağlanmalısın.");
+    if (!user) return pushMessage("bot", "Kime ödül göndereyim? Kayıtlı bir kullanıcı olmalısın.");
+    // Simülasyon: dragon reward
+    pushMessage("bot", `${user.name} kullanıcısına Dragon City üzerinden simüle ödül gönderildi.`);
+    notifyOwner(`Dragon ödülü gönderildi (simülasyon) -> ${user.email}`);
+  }
+
+  // Admin: kullanıcıları temizle (lokal)
+  function clearUsers() {
+    if (!confirm("Tüm yerel kullanıcı verilerini temizlemek istediğine emin misin?")) return;
+    setUsersList([]);
+    setUser(null);
+    localStorage.removeItem("cloudai_users_list");
+    localStorage.removeItem("cloudai_user");
+    pushMessage("bot", "Tüm yerel kullanıcı verileri temizlendi.");
+  }
+
+  // Hızlı eylem butonları
+  function quick(type) {
+    if (type === 'register') {
+      // doldurucu demo verisi
+      setNameInput('Demo Kullanıcı');
+      setEmailInput(`demo${Date.now()}@gmail.com`);
+    }
+    if (type === 'greet') {
+      setChatInput('Merhaba');
+      setTimeout(() => handleSendMessage(), 50);
+    }
+    if (type === 'gems') {
+      setChatInput('Elmasım kaç?');
+      setTimeout(() => handleSendMessage(), 50);
+    }
+  }
+
+  // Basit component render
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-indigo-50 to-white p-6 flex items-start justify-center">
+      <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.35 }} className="w-full max-w-5xl bg-white rounded-2xl shadow-xl p-6">
+        <header className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-full bg-gradient-to-br from-sky-500 to-violet-500 flex items-center justify-center text-white font-bold">☁️</div>
+            <div>
+              <h1 className="text-2xl font-bold">Cloud.AI</h1>
+              <p className="text-sm text-gray-500">Sohbet, görevler ve Dragon City simülasyonu — prototip</p>
+            </div>
+          </div>
+
+          <div className="text-right">
+            <div className="text-sm text-gray-600">Elmas</div>
+            <div className="text-lg font-semibold">{user ? user.gems : 0} ✨</div>
+            <div className="text-xs text-gray-400 mt-1">{user ? user.name : 'Kayıtsız kullanıcı'}</div>
+          </div>
+        </header>
+
+        <main className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Sol: Kayıt + Görevler */}
+          <section className="lg:col-span-1 bg-sky-50 rounded-xl p-4">
+            <h2 className="font-semibold">Kayıt & Profil</h2>
+            {user ? (
+              <div className="mt-3">
+                <div className="text-sm">Ad: <strong>{user.name}</strong></div>
+                <div className="text-sm">E-mail: <span className="text-gray-600">{user.email}</span></div>
+                <div className="text-sm">Kayıt: {new Date(user.registeredAt).toLocaleString()}</div>
+                <div className="mt-2 flex gap-2">
+                  <button className="px-3 py-2 rounded bg-white border" onClick={() => { setUser(null); localStorage.removeItem('cloudai_user'); pushMessage('bot','Çıkış yapıldı.'); }}>Çıkış Yap</button>
+                  <button className="px-3 py-2 rounded bg-yellow-400" onClick={() => completeTask('t_intro')}>Tanıtım Görevini Tamamla</button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={handleRegister} className="mt-3 space-y-2">
+                <input value={nameInput} onChange={(e)=>setNameInput(e.target.value)} placeholder="İsim" className="w-full p-2 rounded border" />
+                <input value={emailInput} onChange={(e)=>setEmailInput(e.target.value)} placeholder="gmail (örn: isim@gmail.com)" type="email" className="w-full p-2 rounded border" />
+                <div className="flex gap-2">
+                  <button className="flex-1 bg-sky-600 text-white p-2 rounded-lg">Kayıt Ol (5 elmas)</button>
+                  <button type="button" className="px-3 py-2 rounded bg-white border" onClick={()=>quick('register')}>Hızlı Doldur</button>
+                </div>
+              </form>
+            )}
+
+            <div className="mt-4">
+              <h3 className="font-medium">Görevler</h3>
+              <ul className="mt-2 space-y-2">
+                {baseTasks.map(t => (
+                  <li key={t.id} className="bg-white p-3 rounded shadow-sm flex items-center justify-between">
+                    <div>
+                      <div className="font-semibold">{t.title}</div>
+                      <div className="text-sm text-gray-500">{t.desc}</div>
+                    </div>
+                    <div className="flex flex-col items-end">
+                      <div className="text-sm">+{t.reward} ✨</div>
+                      <button className="mt-2 px-3 py-1 rounded bg-sky-600 text-white text-sm" onClick={()=>completeTask(t.id)}>Tamamla</button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="mt-4">
+              <h3 className="font-medium">Dragon City</h3>
+              <p className="text-sm text-gray-500 mt-2">Gerçek entegrasyon için backend & API anahtarı gereklidir. Aşağıdaki simülasyon kontrolü ile deneyebilirsin.</p>
+              <div className="mt-2 flex gap-2">
+                <button className={`px-3 py-2 rounded ${dragonConnected ? 'bg-green-500 text-white' : 'bg-white border'}`} onClick={handleDragonToggle}>{dragonConnected ? 'Bağlı (Simülasyon)' : 'Dragon City Bağlan'}</button>
+                <button className="px-3 py-2 rounded bg-indigo-600 text-white" onClick={simulateSendDragonReward}>Simüle Ödül Gönder</button>
+              </div>
+            </div>
+
+          </section>
+
+          {/* Orta + Sağ: Sohbet */}
+          <section className="lg:col-span-2 bg-white rounded-xl p-4 border">
+            <div className="flex items-start justify-between">
+              <h2 className="font-semibold mb-2">Sohbet</h2>
+              <div className="text-xs text-gray-400">Cloud robot ismine göre hitap eder.</div>
+            </div>
+
+            <div className="h-96 overflow-y-auto border rounded p-3 bg-gray-50">
+              {messages.map((m,i) => (
+                <div key={i} className={`mb-3 flex ${m.from==='bot' ? 'justify-start' : 'justify-end'}`}>
+                  <div className={`${m.from==='bot' ? 'bg-white' : 'bg-sky-600 text-white'} p-3 rounded-lg max-w-3/4`}>{m.text}</div>
+                </div>
+              ))}
+              <div ref={chatEndRef} />
+            </div>
+
+            <form onSubmit={handleSendMessage} className="mt-3 flex gap-2">
+              <input value={chatInput} onChange={(e)=>setChatInput(e.target.value)} placeholder={user? `${user.name}, bir şey yaz...` : 'Bir şey yaz...'} className="flex-1 p-2 border rounded" />
+              <button className="px-4 py-2 rounded bg-sky-600 text-white">Gönder</button>
+              <button type="button" className="px-3 py-2 rounded bg-white border" onClick={()=>quick('greet')}>Selam</button>
+              <button type="button" className="px-3 py-2 rounded bg-white border" onClick={()=>quick('gems')}>Elması Sor</button>
+            </form>
+
+            <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-2">
+              <button className="p-2 rounded bg-yellow-300" onClick={()=>claimDaily()}>Günlük Ödül Al (+1)</button>
+              <button className="p-2 rounded bg-white border" onClick={()=>pushMessage('bot', 'Cloud robot: Hatırlatma - İstersen Dragon City ödül simülasyonu yapabilirsin.')}>Hatırlatıcı Gönder</button>
+              <button className="p-2 rounded bg-white border" onClick={()=>pushMessage('bot', 'Cloud robot: Hangi özelliği geliştirmemi istersin? (Ses, daha akıllı cevaplar, gerçek entegrasyon)')}>Geliştirme Önerisi İste</button>
+            </div>
+
+          </section>
+        </main>
+
+        <footer className="mt-6 flex items-center justify-between text-xs text-gray-500">
+          <div>Cloud.AI — Gelişmiş prototip. Backend & LLM entegrasyonu için bana talimat ver.</div>
+          <div className="flex gap-2 items-center">
+            <div>Admin:</div>
+            <button className="px-2 py-1 rounded bg-red-100 text-red-700" onClick={clearUsers}>Yerel verileri temizle</button>
+            <button className="px-2 py-1 rounded bg-white border" onClick={()=>{ navigator.clipboard?.writeText(JSON.stringify(usersList)); alert('Kullanıcı listesi panoya kopyalandı.') }}>Kullanıcıları Kopyala</button>
+          </div>
+        </footer>
+      </motion.div>
+    </div>
+  );
+}
